@@ -1,0 +1,9 @@
+wtd_performance.csv
+WTD spend was $24,779 which was 2.19% to our weekly budget goal of $1,130,700
+
+PLATFORM SPEND (% TO GOAL)
+GOOGLE ADS    =      0%
+DV360         =      1%
+DV360 YOUTUBE =      8%
+REMERGE       =     11%
+YOUTUBE       =      0%

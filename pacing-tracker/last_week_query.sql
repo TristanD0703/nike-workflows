@@ -8,13 +8,14 @@ WITH PME as (
         SUM(media_spend) as spend, 
         (harmonized_campaign_initiative || ' ' || harmonized_sub_campaign) as big_boi_campaign, 
         pmg_channel,
-        ad_type_tactic
+        ad_type_tactic,
+        retail_week
     FROM nike_na_custom.analytics_omnichannel 
     WHERE harmonized_budget_type = 'nddc - display' 
     AND media_spend > 0
     AND pmg_channel = 'display'
-    AND date >= (current_date - extract(dow from current_date)::integer)
-    AND date < CURRENT_DATE
+    AND date >= (current_date - extract(dow from current_date)::integer - 7)
+    AND date < (current_date - extract(dow from current_date)::integer)
     GROUP BY 
         harmonized_sub_campaign, 
         harmonized_publisher_platform, 
@@ -22,7 +23,8 @@ WITH PME as (
         harmonized_budget_type, 
         harmonized_campaign_initiative, 
         pmg_channel,
-        ad_type_tactic
+        ad_type_tactic,
+        retail_week
 ),
 PLD AS (
     SELECT
@@ -38,14 +40,15 @@ FROM nike_na.copy_of_budgets_and_goals_fy26_pld_1772748449255
 WHERE
     budget_source = 'NDDC - Display'
     AND pmg_channel_team = 'Programmatic'
-    AND CURRENT_DATE >= start_date
-    AND CURRENT_DATE <= end_date
+    AND start_date <= (current_date - extract(dow from current_date)::integer - 1)
+    AND end_date >= (current_date - extract(dow from current_date)::integer - 7)
 ORDER BY retail_week DESC
 )
 SELECT * 
 FROM PLD FULL OUTER JOIN PME ON 
 (platform = harmonized_partner OR platform = 'google ads')
 AND publisher = harmonized_publisher_platform
+AND PME.retail_week = PLD.retail_week
 AND big_boi_campaign LIKE '%' || initiativecampaign || '%'
 
 

@@ -1,30 +1,44 @@
 """Build a WTD performance-to-goal Excel workbook from campaign CSV data.
 
-Reads `wtd_campaign_performance_against_budget_goals_*.csv`, aggregates spend,
-budget goal, impressions, and clicks per platform bucket + campaign +
-publisher + tactic (with `dv360 + youtube` split into its own bucket), and
-writes a formatted `wtd_performance_to_goal.xlsx` workbook.
+Scans `pacing-tracker/reports/` for CSVs, aggregates spend, budget goal,
+impressions, and clicks per platform bucket + campaign + publisher + tactic
+(with `dv360 + youtube` split into its own bucket), and writes a formatted
+`wtd_performance_to_goal.xlsx` workbook with one tab per CSV.
 """
 
 import argparse
 import csv
 from collections import Counter, defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 
-DEFAULT_CSV_FILE = (
-    "wtd_campaign_performance_against_budget_goals_"
-    "2026-04-23_09-45-18_69ea307d02a45000077faea1.csv"
-)
+DEFAULT_REPORTS_DIR = "reports"
 DEFAULT_OUTPUT_FILE = "wtd_performance_to_goal.xlsx"
 
+SLACK_UNASSOCIATED_FILE = "slack_unassociated.txt"
+SLACK_PREVIEW_FILE = "slack_preview.txt"
+LEGACY_MISSING_FILES = ("performance_missing_goal.csv", "goals_missing_performance.csv")
+RESERVED_OUTPUT_NAMES = {SLACK_UNASSOCIATED_FILE, SLACK_PREVIEW_FILE, *LEGACY_MISSING_FILES}
+
+MISSING_GOAL_HEADERS = ["CAMPAIGN", "SPEND", "IMPRESSIONS", "CLICKS", "PUBLISHER", "PLATFORM"]
+MISSING_PERF_HEADERS = ["CAMPAIGN", "PLATFORM", "PUBLISHER", "SPEND GOAL"]
+
+SLACK_UNASSOCIATED_HEADER = (
+    "The pacing tracker was unable to associate campaign metrics and budgets "
+    "for the following campaigns:"
+)
+
 NULL_BUCKET = "null"
+
+INVALID_SHEET_CHARS = set(r"\/?*[]:")
+SHEET_NAME_LIMIT = 31
 
 # Visual styling -------------------------------------------------------------
 
@@ -94,6 +108,10 @@ def normalize(value: str | None) -> str:
     return cleaned
 
 
+def is_null_value(value: str | None) -> bool:
+    return normalize(value) == ""
+
+
 def get_bucket(platform: str, publisher: str) -> str:
     if not platform:
         return NULL_BUCKET
@@ -106,12 +124,16 @@ def get_bucket(platform: str, publisher: str) -> str:
 
 
 def aggregate_rows(csv_path: Path):
-    """Return (buckets, retail_week).
+    """Return (buckets, retail_week, missing_goal_rows, missing_perf_rows).
 
     buckets: dict[bucket_name, dict] with keys:
         - details: list[dict] of aggregated detail rows
         - totals: dict of section totals
     retail_week: most common retail_week value in the CSV (string) or "".
+    missing_goal_rows: list[dict] for performance_missing_goal.csv (rows with
+        null update_total_budget).
+    missing_perf_rows: list[dict] for goals_missing_performance.csv (rows with
+        null spend).
     """
 
     # detail_key -> bucket name -> aggregated metrics
@@ -126,6 +148,8 @@ def aggregate_rows(csv_path: Path):
         }
     )
     retail_week_counter: Counter[str] = Counter()
+    missing_goal_rows: list[dict] = []
+    missing_perf_rows: list[dict] = []
 
     with csv_path.open(mode="r", encoding="utf-8-sig", newline="") as csv_file:
         reader = csv.DictReader(csv_file)
@@ -175,6 +199,28 @@ def aggregate_rows(csv_path: Path):
             if retail_week:
                 retail_week_counter[retail_week] += 1
 
+            if is_null_value(row.get("update_total_budget")):
+                missing_goal_rows.append(
+                    {
+                        "campaign_name": normalize(row.get("big_boi_campaign")),
+                        "spend": float(spend),
+                        "impressions": impressions,
+                        "clicks": clicks,
+                        "publisher": normalize(row.get("harmonized_publisher_platform")),
+                        "platform": normalize(row.get("harmonized_partner")),
+                    }
+                )
+
+            if is_null_value(row.get("spend")):
+                missing_perf_rows.append(
+                    {
+                        "campaign_name": normalize(row.get("initiativecampaign")),
+                        "platform": platform,
+                        "publisher": publisher,
+                        "spend_goal": float(goal),
+                    }
+                )
+
     buckets: dict[str, dict] = {}
     for bucket, details_map in bucket_details.items():
         details = sorted(
@@ -186,26 +232,26 @@ def aggregate_rows(csv_path: Path):
     retail_week = (
         retail_week_counter.most_common(1)[0][0] if retail_week_counter else ""
     )
-    return buckets, retail_week
+    return buckets, retail_week, missing_goal_rows, missing_perf_rows
 
 
 # Week / pacing helpers ------------------------------------------------------
 
 
-def percent_through_current_week(today: date | None = None) -> tuple[date, date, float]:
+def percent_through_current_week() -> tuple[date, date, float]:
     """Return (start_of_week_sunday, end_of_week_saturday, pct_through_week).
 
-    Percent is calculated as (days elapsed + 1) / 7, matching the screenshot's
-    inclusive day count (so Tuesday = 4/7 = ~57%).
+    Reference date is yesterday — pacing reports run the morning after, so
+    "yesterday" is the latest day with complete data. Percent is the inclusive
+    day count through yesterday divided by 7.
     """
 
-    today = today or date.today()
-    # Python weekday: Monday=0 ... Sunday=6.
-    # We want Sunday=0 ... Saturday=6.
-    sunday_offset = (today.weekday() + 1) % 7
-    start = today - timedelta(days=sunday_offset)
+    reference = date.today() - timedelta(days=1)
+    # Python weekday: Monday=0 ... Sunday=6. We want Sunday=0 ... Saturday=6.
+    sunday_offset = (reference.weekday() + 1) % 7
+    start = reference - timedelta(days=sunday_offset)
     end = start + timedelta(days=6)
-    elapsed_days = (today - start).days + 1  # inclusive day count
+    elapsed_days = (reference - start).days + 1  # inclusive day count
     pct = elapsed_days / 7
     return start, end, pct
 
@@ -399,11 +445,7 @@ def _bucket_order(buckets: dict[str, dict]) -> list[str]:
     return ordered
 
 
-def build_workbook(buckets: dict[str, dict], retail_week: str, output_path: Path) -> None:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "WTD | Performance to Goal"
-
+def _populate_sheet(ws, buckets: dict[str, dict], retail_week: str) -> None:
     # Column A label column width for the top section.
     ws.column_dimensions["A"].width = 28
     ws.column_dimensions["B"].width = 18
@@ -495,10 +537,168 @@ def build_workbook(buckets: dict[str, dict], retail_week: str, output_path: Path
     # Freeze panes below the table header.
     ws.freeze_panes = f"A{table_start + 1}"
 
+
+def discover_reports(reports_dir: Path) -> list[Path]:
+    if not reports_dir.is_dir():
+        raise SystemExit(f"Reports directory not found: {reports_dir}")
+    csvs = sorted(
+        p
+        for p in reports_dir.iterdir()
+        if p.suffix.lower() == ".csv" and p.name not in RESERVED_OUTPUT_NAMES
+    )
+    if not csvs:
+        raise SystemExit(f"No CSV files in {reports_dir}")
+    return csvs
+
+
+def _escape_cell(value) -> str:
+    return str(value).replace("|", r"\|")
+
+
+def _format_markdown_table(headers: list[str], rows: list[list]) -> str:
+    cells = [[_escape_cell(h) for h in headers]]
+    cells.extend([_escape_cell(v) for v in row] for row in rows)
+    widths = [max(len(row[i]) for row in cells) for i in range(len(headers))]
+
+    def render(row: list[str]) -> str:
+        return "| " + " | ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)) + " |"
+
+    separator = "| " + " | ".join("-" * widths[i] for i in range(len(headers))) + " |"
+    return "\n".join([render(cells[0]), separator, *(render(row) for row in cells[1:])])
+
+
+def _missing_goal_table(rows: list[dict]) -> str:
+    table_rows = [
+        [
+            r["campaign_name"],
+            f"${r['spend']:,.0f}",
+            f"{r['impressions']:,}",
+            f"{r['clicks']:,}",
+            r["publisher"],
+            r["platform"],
+        ]
+        for r in rows
+    ]
+    return _format_markdown_table(MISSING_GOAL_HEADERS, table_rows)
+
+
+def _missing_perf_table(rows: list[dict]) -> str:
+    table_rows = [
+        [
+            r["campaign_name"],
+            r["platform"],
+            r["publisher"],
+            f"${r['spend_goal']:,.0f}",
+        ]
+        for r in rows
+    ]
+    return _format_markdown_table(MISSING_PERF_HEADERS, table_rows)
+
+
+def build_slack_unassociated(
+    sections: list[tuple[str, list[dict], list[dict]]],
+) -> str | None:
+    qualifying = [
+        (name, mg, mp) for name, mg, mp in sections if mg and mp
+    ]
+    if not qualifying:
+        return None
+
+    blocks = []
+    for csv_name, missing_goal, missing_perf in qualifying:
+        block = "\n".join(
+            [
+                csv_name,
+                "Campaign performance without goals:",
+                "```",
+                _missing_goal_table(missing_goal),
+                "```",
+                "",
+                "Campaign spend goals without performance:",
+                "```",
+                _missing_perf_table(missing_perf),
+                "```",
+            ]
+        )
+        blocks.append(block)
+
+    return SLACK_UNASSOCIATED_HEADER + "\n\n" + "\n\n".join(blocks) + "\n"
+
+
+def build_slack_preview(
+    sections: list[tuple[str, dict[str, dict]]],
+) -> str | None:
+    blocks = []
+    for csv_name, buckets in sections:
+        platforms = []
+        total_spend = Decimal("0")
+        total_goal = Decimal("0")
+        for bucket in _bucket_order(buckets):
+            if bucket == NULL_BUCKET:
+                continue
+            totals = buckets[bucket]["totals"]
+            if totals["goal"] <= 0:
+                continue
+            platforms.append((bucket, totals["spend"], totals["goal"]))
+            total_spend += totals["spend"]
+            total_goal += totals["goal"]
+
+        if not platforms:
+            continue
+
+        total_pct = float(total_spend / total_goal * 100) if total_goal else 0.0
+        lines = [
+            csv_name,
+            (
+                f"WTD spend was ${total_spend:,.0f} which was {total_pct:.2f}% "
+                f"to our weekly budget goal of ${total_goal:,.0f}"
+            ),
+            "",
+            "PLATFORM SPEND (% TO GOAL)",
+        ]
+        name_width = max(len(b.upper()) for b, _, _ in platforms)
+        for bucket, spend, goal in platforms:
+            pct = float(spend / goal * 100)
+            lines.append(f"{bucket.upper().ljust(name_width)} = {pct:>6.0f}%")
+        blocks.append("\n".join(lines))
+
+    if not blocks:
+        return None
+    return "\n\n".join(blocks) + "\n"
+
+
+def sheet_name_from_path(path: Path, taken: set[str]) -> str:
+    cleaned = "".join("_" if c in INVALID_SHEET_CHARS else c for c in path.stem)
+    name = cleaned[:SHEET_NAME_LIMIT] or "sheet"
+    if name in taken:
+        i = 2
+        while True:
+            suffix = f"_{i}"
+            candidate = name[: SHEET_NAME_LIMIT - len(suffix)] + suffix
+            if candidate not in taken:
+                name = candidate
+                break
+            i += 1
+    taken.add(name)
+    return name
+
+
+def build_workbook(
+    reports: list[tuple[str, dict[str, dict], str]], output_path: Path
+) -> None:
+    wb = Workbook()
+    wb.remove(wb.active)
+    for sheet_name, buckets, retail_week in reports:
+        ws = wb.create_sheet(title=sheet_name)
+        _populate_sheet(ws, buckets, retail_week)
     wb.save(output_path)
 
 
 def main() -> None:
+    now = datetime.now(ZoneInfo("America/Chicago"))
+    if time(10, 0) <= now.time() <= time(10, 50):
+        Path("time.txt").write_text(now.isoformat())
+
     parser = argparse.ArgumentParser(
         description=(
             "Aggregate weekly campaign performance data into a formatted "
@@ -506,10 +706,9 @@ def main() -> None:
         )
     )
     parser.add_argument(
-        "csv_file",
-        nargs="?",
-        default=DEFAULT_CSV_FILE,
-        help="Path to campaign CSV file.",
+        "--reports-dir",
+        default=DEFAULT_REPORTS_DIR,
+        help="Directory containing campaign CSV files (default: reports/).",
     )
     parser.add_argument(
         "-o",
@@ -521,28 +720,60 @@ def main() -> None:
 
     script_dir = Path(__file__).resolve().parent
 
-    csv_path = Path(args.csv_file)
-    if not csv_path.is_absolute():
-        csv_path = script_dir / csv_path
+    reports_dir = Path(args.reports_dir)
+    if not reports_dir.is_absolute():
+        reports_dir = script_dir / reports_dir
 
     output_path = Path(args.output)
     if not output_path.is_absolute():
         output_path = script_dir / output_path
 
-    buckets, retail_week = aggregate_rows(csv_path)
-    build_workbook(buckets, retail_week, output_path)
+    csv_paths = discover_reports(reports_dir)
+    taken: set[str] = set()
+    reports: list[tuple[str, dict[str, dict], str]] = []
+    unassociated_sections: list[tuple[str, list[dict], list[dict]]] = []
+    preview_sections: list[tuple[str, dict[str, dict]]] = []
+    for csv_path in csv_paths:
+        buckets, retail_week, missing_goal, missing_perf = aggregate_rows(csv_path)
+        reports.append((sheet_name_from_path(csv_path, taken), buckets, retail_week))
+        unassociated_sections.append((csv_path.name, missing_goal, missing_perf))
+        preview_sections.append((csv_path.name, buckets))
 
-    print(f"Wrote {output_path}")
-    print(f"Retail week: {retail_week or 'N/A'}")
-    for bucket, section in buckets.items():
-        totals = section["totals"]
-        spend = float(totals["spend"])
-        goal = float(totals["goal"])
-        pct = (spend / goal * 100) if goal else 0.0
-        print(
-            f"  {bucket}: rows={totals['rows']}, "
-            f"spend=${spend:,.2f}, goal=${goal:,.2f}, %goal={pct:,.2f}%"
-        )
+    build_workbook(reports, output_path)
+
+    slack_path = reports_dir / SLACK_UNASSOCIATED_FILE
+    preview_path = reports_dir / SLACK_PREVIEW_FILE
+    for legacy_name in (
+        SLACK_UNASSOCIATED_FILE,
+        SLACK_PREVIEW_FILE,
+        *LEGACY_MISSING_FILES,
+    ):
+        legacy_path = reports_dir / legacy_name
+        if legacy_path.exists():
+            legacy_path.unlink()
+
+    body = build_slack_unassociated(unassociated_sections)
+    if body is not None:
+        slack_path.write_text(body, encoding="utf-8")
+        print(f"Wrote {slack_path}")
+
+    preview_body = build_slack_preview(preview_sections)
+    if preview_body is not None:
+        preview_path.write_text(preview_body, encoding="utf-8")
+        print(f"Wrote {preview_path}")
+
+    print(f"Wrote {output_path} ({len(reports)} sheets)")
+    for sheet_name, buckets, retail_week in reports:
+        print(f"  [{sheet_name}] retail_week={retail_week or 'N/A'}")
+        for bucket, section in buckets.items():
+            totals = section["totals"]
+            spend = float(totals["spend"])
+            goal = float(totals["goal"])
+            pct = (spend / goal * 100) if goal else 0.0
+            print(
+                f"    {bucket}: rows={totals['rows']}, "
+                f"spend=${spend:,.2f}, goal=${goal:,.2f}, %goal={pct:,.2f}%"
+            )
 
 
 if __name__ == "__main__":
