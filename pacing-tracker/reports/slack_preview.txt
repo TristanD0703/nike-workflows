@@ -1,9 +1,12 @@
-wtd_performance.csv
-WTD spend was $24,779 which was 2.19% to our weekly budget goal of $1,130,700
+Good morning team! Stay tuned for your daily pacing update...
+We are currently 28.57% through the week
+
+**wtd_performance**
+Spend for this time period was $24,779 which was 2.19% to our weekly budget goal of $1,130,700
 
 PLATFORM SPEND (% TO GOAL)
-GOOGLE ADS    =      0%
-DV360         =      1%
-DV360 YOUTUBE =      8%
-REMERGE       =     11%
-YOUTUBE       =      0%
+:google: GOOGLE ADS    =      0%  (Δ28.6%)
+:dv360: DV360         =      1%  (Δ27.2%)
+:youtube2: DV360 YOUTUBE =      8%  (Δ21.0%)
+:remerge: REMERGE       =     11%  (Δ17.7%)
+YOUTUBE       =      0%  (Δ28.6%)

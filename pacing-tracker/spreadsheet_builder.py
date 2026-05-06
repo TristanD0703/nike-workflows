@@ -630,6 +630,7 @@ def build_slack_preview(
 ) -> str | None:
     blocks = []
     for csv_name, buckets in sections:
+        csv_name = csv_name.split(".")[0]
         platforms = []
         total_spend = Decimal("0")
         total_goal = Decimal("0")
@@ -648,18 +649,29 @@ def build_slack_preview(
 
         total_pct = float(total_spend / total_goal * 100) if total_goal else 0.0
         lines = [
-            csv_name,
+            f"*{csv_name}*",
             (
-                f"WTD spend was ${total_spend:,.0f} which was {total_pct:.2f}% "
+                f"Spend for this time period was ${total_spend:,.0f} which was {total_pct:.2f}% "
                 f"to our weekly budget goal of ${total_goal:,.0f}"
             ),
             "",
             "PLATFORM SPEND (% TO GOAL)",
         ]
+        _platform_emojis = {
+            "google ads": ":google:",
+            "dv360": ":dv360:",
+            "dv360 youtube": ":youtube2:",
+            "remerge": ":remerge:",
+        }
+        _, _, pct_through_week = percent_through_current_week()
         name_width = max(len(b.upper()) for b, _, _ in platforms)
         for bucket, spend, goal in platforms:
             pct = float(spend / goal * 100)
-            lines.append(f"{bucket.upper().ljust(name_width)} = {pct:>6.0f}%")
+            discrepancy = abs(pct - pct_through_week * 100)
+            emoji = _platform_emojis.get(bucket.lower(), "")
+            prefix = f"{emoji} " if emoji else ""
+            delta = f"  *(Δ{discrepancy:.1f}%)*" if discrepancy > 2 else ""
+            lines.append(f"{prefix}`{bucket.upper().ljust(name_width)} = {pct:>6.0f}%`{delta}")
         blocks.append("\n".join(lines))
 
     if not blocks:
@@ -757,7 +769,8 @@ def main() -> None:
         slack_path.write_text(body, encoding="utf-8")
         print(f"Wrote {slack_path}")
 
-    preview_body = build_slack_preview(preview_sections)
+    preview_body = f"Good morning team! Stay tuned for your daily pacing update :running-pug:\n <https://docs.google.com/spreadsheets/d/1Gc6msRdLWa3shTNoPj0eyWD7RBm8-Q1i_c92N4Us064|PACING SHEET>\nWe are currently {percent_through_current_week()[2]*100:.2f}% through the week :clock3:\n\n{build_slack_preview(preview_sections)}"
+
     if preview_body is not None:
         preview_path.write_text(preview_body, encoding="utf-8")
         print(f"Wrote {preview_path}")
