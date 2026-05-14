@@ -292,17 +292,22 @@ COLUMNS: list[tuple[str, str, str]] = [
     ("% TO GOAL", "percent", 12),
     ("IMPRESSIONS", "int", 14),
     ("CLICKS", "int", 12),
-    ("CTR", "percent", 10),
+    ("CTR", "percent_decimal", 10),
 ]
 
 
 def _fmt(kind: str) -> str:
     return {
         "currency": '"$"#,##0',
-        "percent": "0.00%",
+        "percent": "0%",
+        "percent_decimal": "0.##%",
         "int": "#,##0",
         "text": "@",
     }[kind]
+
+
+def _is_numeric_kind(kind: str) -> bool:
+    return kind in ("currency", "percent", "percent_decimal", "int")
 
 
 def _apply_row_format(
@@ -333,7 +338,7 @@ def _write_detail_row(ws, row_idx: int, detail: dict) -> None:
         cell = ws.cell(row=row_idx, column=col_idx, value=value)
         kind = COLUMNS[col_idx - 1][1]
         cell.number_format = _fmt(kind)
-        if kind in ("currency", "percent", "int"):
+        if _is_numeric_kind(kind):
             cell.alignment = RIGHT
         elif col_idx == 1:
             cell.alignment = LEFT
@@ -392,7 +397,7 @@ def _write_total_row(
         cell.border = BORDER
         if col_idx == 1:
             cell.alignment = LEFT
-        elif kind in ("currency", "percent", "int"):
+        elif _is_numeric_kind(kind):
             cell.alignment = RIGHT
         else:
             cell.alignment = CENTER
@@ -432,7 +437,7 @@ def _write_top_section(
 
     ws.cell(row=5, column=1, value="% THROUGH WEEK")
     pct_cell = ws.cell(row=5, column=2, value=pct)
-    pct_cell.number_format = "0.00%"
+    pct_cell.number_format = _fmt("percent")
 
     for row in range(2, 6):
         label_cell = ws.cell(row=row, column=1)
@@ -556,7 +561,7 @@ def _populate_sheet(
             cell.border = BORDER
             if col_idx == 1:
                 cell.alignment = LEFT
-            elif kind in ("currency", "percent", "int"):
+            elif _is_numeric_kind(kind):
                 cell.alignment = RIGHT
             else:
                 cell.alignment = CENTER
