@@ -1,12 +1,22 @@
-Good morning team! Stay tuned for your daily pacing update...
-We are currently 28.57% through the week
+Good morning team! Stay tuned for your daily pacing update :running-pug:
+ <https://docs.google.com/spreadsheets/d/1Gc6msRdLWa3shTNoPj0eyWD7RBm8-Q1i_c92N4Us064|PACING SHEET>
+Pacing percentage varies by report period :clock3:
 
-**wtd_performance**
-Spend for this time period was $24,779 which was 2.19% to our weekly budget goal of $1,130,700
+*Last Week*
+Spend for this time period was $885,812 which was 80.73% to our weekly budget goal of $1,097,218
 
 PLATFORM SPEND (% TO GOAL)
-:google: GOOGLE ADS    =      0%  (Δ28.6%)
-:dv360: DV360         =      1%  (Δ27.2%)
-:youtube2: DV360 YOUTUBE =      8%  (Δ21.0%)
-:remerge: REMERGE       =     11%  (Δ17.7%)
-YOUTUBE       =      0%  (Δ28.6%)
+:google: `GOOGLE ADS    =    100%`
+:dv360: `DV360         =     99%`
+:youtube2: `DV360 YOUTUBE =     80%`  *(Δ20.2%)*
+:remerge: `REMERGE       =    101%`
+`GROUNDTRUTH   =      0%`  *(Δ100.0%)*
+
+*Week To Date*
+Spend for this time period was $522,227 which was 51.90% to our weekly budget goal of $1,006,226
+
+PLATFORM SPEND (% TO GOAL)
+:google: `GOOGLE ADS    =     58%`
+:dv360: `DV360         =     50%`  *(Δ7.5%)*
+:youtube2: `DV360 YOUTUBE =     56%`
+:remerge: `REMERGE       =     71%`  *(Δ13.9%)*

@@ -112,6 +112,10 @@ def is_null_value(value: str | None) -> bool:
     return normalize(value) == ""
 
 
+def normalize_report_name(value: str) -> str:
+    return " ".join(value.replace("_", " ").replace("-", " ").lower().split())
+
+
 def get_bucket(platform: str, publisher: str) -> str:
     if not platform:
         return NULL_BUCKET
@@ -238,7 +242,13 @@ def aggregate_rows(csv_path: Path):
 # Week / pacing helpers ------------------------------------------------------
 
 
-def percent_through_current_week() -> tuple[date, date, float]:
+def start_of_week_sunday(reference: date) -> date:
+    # Python weekday: Monday=0 ... Sunday=6. We want Sunday=0 ... Saturday=6.
+    sunday_offset = (reference.weekday() + 1) % 7
+    return reference - timedelta(days=sunday_offset)
+
+
+def percent_through_current_week(today: date | None = None) -> tuple[date, date, float]:
     """Return (start_of_week_sunday, end_of_week_saturday, pct_through_week).
 
     Reference date is yesterday — pacing reports run the morning after, so
@@ -246,14 +256,27 @@ def percent_through_current_week() -> tuple[date, date, float]:
     day count through yesterday divided by 7.
     """
 
-    reference = date.today() - timedelta(days=1)
-    # Python weekday: Monday=0 ... Sunday=6. We want Sunday=0 ... Saturday=6.
-    sunday_offset = (reference.weekday() + 1) % 7
-    start = reference - timedelta(days=sunday_offset)
+    reference = (today or date.today()) - timedelta(days=1)
+    start = start_of_week_sunday(reference)
     end = start + timedelta(days=6)
     elapsed_days = (reference - start).days + 1  # inclusive day count
     pct = elapsed_days / 7
     return start, end, pct
+
+
+def percent_through_last_week(today: date | None = None) -> tuple[date, date, float]:
+    """Return the completed prior Sunday-Saturday week at 100% complete."""
+
+    current_week_start = start_of_week_sunday(today or date.today())
+    start = current_week_start - timedelta(days=7)
+    end = start + timedelta(days=6)
+    return start, end, 1.0
+
+
+def week_period_for_report(report_name: str) -> tuple[date, date, float]:
+    if "last week" in normalize_report_name(report_name):
+        return percent_through_last_week()
+    return percent_through_current_week()
 
 
 # Workbook building ----------------------------------------------------------
@@ -393,8 +416,10 @@ def _write_section_header(ws, row_idx: int, label: str, is_null: bool) -> None:
         cell.alignment = LEFT
 
 
-def _write_top_section(ws, retail_week: str) -> int:
-    start, end, pct = percent_through_current_week()
+def _write_top_section(
+    ws, retail_week: str, week_period: tuple[date, date, float]
+) -> int:
+    start, end, pct = week_period
 
     ws.cell(row=2, column=1, value="RETAIL WEEK")
     ws.cell(row=2, column=2, value=retail_week or "N/A")
@@ -445,12 +470,14 @@ def _bucket_order(buckets: dict[str, dict]) -> list[str]:
     return ordered
 
 
-def _populate_sheet(ws, buckets: dict[str, dict], retail_week: str) -> None:
+def _populate_sheet(
+    ws, buckets: dict[str, dict], retail_week: str, week_period: tuple[date, date, float]
+) -> None:
     # Column A label column width for the top section.
     ws.column_dimensions["A"].width = 28
     ws.column_dimensions["B"].width = 18
 
-    table_start = _write_top_section(ws, retail_week)
+    table_start = _write_top_section(ws, retail_week, week_period)
     _write_table_header(ws, table_start)
 
     current_row = table_start + 1
@@ -626,10 +653,10 @@ def build_slack_unassociated(
 
 
 def build_slack_preview(
-    sections: list[tuple[str, dict[str, dict]]],
+    sections: list[tuple[str, dict[str, dict], tuple[date, date, float]]],
 ) -> str | None:
     blocks = []
-    for csv_name, buckets in sections:
+    for csv_name, buckets, week_period in sections:
         csv_name = csv_name.split(".")[0]
         platforms = []
         total_spend = Decimal("0")
@@ -663,7 +690,7 @@ def build_slack_preview(
             "dv360 youtube": ":youtube2:",
             "remerge": ":remerge:",
         }
-        _, _, pct_through_week = percent_through_current_week()
+        _, _, pct_through_week = week_period
         name_width = max(len(b.upper()) for b, _, _ in platforms)
         for bucket, spend, goal in platforms:
             pct = float(spend / goal * 100)
@@ -677,6 +704,16 @@ def build_slack_preview(
     if not blocks:
         return None
     return "\n\n".join(blocks) + "\n"
+
+
+def build_slack_period_line(
+    sections: list[tuple[str, dict[str, dict], tuple[date, date, float]]],
+) -> str:
+    pcts = {week_period[2] for _, _, week_period in sections}
+    if len(pcts) == 1:
+        pct = next(iter(pcts)) * 100
+        return f"We are currently {pct:.2f}% through the week :clock3:"
+    return "Pacing percentage varies by report period :clock3:"
 
 
 def sheet_name_from_path(path: Path, taken: set[str]) -> str:
@@ -696,13 +733,14 @@ def sheet_name_from_path(path: Path, taken: set[str]) -> str:
 
 
 def build_workbook(
-    reports: list[tuple[str, dict[str, dict], str]], output_path: Path
+    reports: list[tuple[str, dict[str, dict], str, tuple[date, date, float]]],
+    output_path: Path,
 ) -> None:
     wb = Workbook()
     wb.remove(wb.active)
-    for sheet_name, buckets, retail_week in reports:
+    for sheet_name, buckets, retail_week, week_period in reports:
         ws = wb.create_sheet(title=sheet_name)
-        _populate_sheet(ws, buckets, retail_week)
+        _populate_sheet(ws, buckets, retail_week, week_period)
     wb.save(output_path)
 
 
@@ -742,14 +780,17 @@ def main() -> None:
 
     csv_paths = discover_reports(reports_dir)
     taken: set[str] = set()
-    reports: list[tuple[str, dict[str, dict], str]] = []
+    reports: list[tuple[str, dict[str, dict], str, tuple[date, date, float]]] = []
     unassociated_sections: list[tuple[str, list[dict], list[dict]]] = []
-    preview_sections: list[tuple[str, dict[str, dict]]] = []
+    preview_sections: list[tuple[str, dict[str, dict], tuple[date, date, float]]] = []
     for csv_path in csv_paths:
         buckets, retail_week, missing_goal, missing_perf = aggregate_rows(csv_path)
-        reports.append((sheet_name_from_path(csv_path, taken), buckets, retail_week))
+        week_period = week_period_for_report(csv_path.stem)
+        reports.append(
+            (sheet_name_from_path(csv_path, taken), buckets, retail_week, week_period)
+        )
         unassociated_sections.append((csv_path.name, missing_goal, missing_perf))
-        preview_sections.append((csv_path.name, buckets))
+        preview_sections.append((csv_path.name, buckets, week_period))
 
     build_workbook(reports, output_path)
 
@@ -769,14 +810,14 @@ def main() -> None:
         slack_path.write_text(body, encoding="utf-8")
         print(f"Wrote {slack_path}")
 
-    preview_body = f"Good morning team! Stay tuned for your daily pacing update :running-pug:\n <https://docs.google.com/spreadsheets/d/1Gc6msRdLWa3shTNoPj0eyWD7RBm8-Q1i_c92N4Us064|PACING SHEET>\nWe are currently {percent_through_current_week()[2]*100:.2f}% through the week :clock3:\n\n{build_slack_preview(preview_sections)}"
+    preview_body = f"Good morning team! Stay tuned for your daily pacing update :running-pug:\n <https://docs.google.com/spreadsheets/d/1Gc6msRdLWa3shTNoPj0eyWD7RBm8-Q1i_c92N4Us064|PACING SHEET>\n{build_slack_period_line(preview_sections)}\n\n{build_slack_preview(preview_sections)}"
 
     if preview_body is not None:
         preview_path.write_text(preview_body, encoding="utf-8")
         print(f"Wrote {preview_path}")
 
     print(f"Wrote {output_path} ({len(reports)} sheets)")
-    for sheet_name, buckets, retail_week in reports:
+    for sheet_name, buckets, retail_week, _ in reports:
         print(f"  [{sheet_name}] retail_week={retail_week or 'N/A'}")
         for bucket, section in buckets.items():
             totals = section["totals"]
